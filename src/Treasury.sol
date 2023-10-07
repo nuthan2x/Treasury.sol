@@ -3,7 +3,7 @@ pragma solidity ^0.8.18;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IProtocol, IGmx} from "src/interfaces/IProtocol.sol";
+import {IProtocol, IAave, IGmx} from "src/interfaces/IProtocol.sol";
 import {IERC20} from "src/interfaces/IERC20.sol";
 import "forge-std/Test.sol";
 
@@ -43,6 +43,7 @@ contract Treasury is Ownable, IProtocol {
     mapping(address token => bool) private isWhitelisted;
 
     Gmx public gmx;
+    AaveV3 public aaveV3;
 
     constructor() {
         remainingRatio = MAX_RATIO;
@@ -136,6 +137,9 @@ contract Treasury is Ownable, IProtocol {
         }
     }
 
+    function setAaveV3(AaveV3 memory _aaveV3) external onlyOwner {
+        aaveV3 = _aaveV3;
+    }
 
     function setGmx(Gmx memory _gmx) external onlyOwner {
         gmx = _gmx;
@@ -144,19 +148,23 @@ contract Treasury is Ownable, IProtocol {
     /////////////////// protocol Functions ////////////////////
     //////////////////////////////////////////////////////////
 
-    function farmInGmx(address token, uint256 amount, uint256 minUsdg, uint256 minGlp) external onlyOwner {
+    function farmGmx(address token, uint256 amount, uint256 minUsdg, uint256 minGlp) external onlyOwner {
         IERC20(token).approve(gmx.GLP_MANAGER, amount);
         uint256 glpAmount = IGmx(gmx.REWARD_ROUTER2).mintAndStakeGlp(token, amount, minUsdg, minGlp);
-        if(adjustedDecimals(token, amount) > balance * protocolRatio[bytes32("gmx")] / MAX_RATIO) {
-            revert MaxRatioExceeded();
-        }
+
+        amount = adjustedDecimals(token, amount);
+        amount = adjustedDecimals(token, amount);
+        uint256 maxFarmable = (balance / 10 ** DEFAULT_DECIMALS) * protocolRatio[bytes32("gmx")] / MAX_RATIO;
+        if (amount / 10 ** DEFAULT_DECIMALS > maxFarmable) revert MaxRatioExceeded();
+
         ProtocolData storage _protocolData = protocolData[bytes32("gmx")][block.timestamp];
 
         _protocolData.investedBalance += uint96(amount);
         _protocolData.tokenUsed = token;
+        balance -= uint96(amount);
     }
 
-    function farmOutGmx(
+    function harvestGmx(
         address tokenIn,
         address tokenOut,
         uint256 glpAmount,
@@ -175,6 +183,7 @@ contract Treasury is Ownable, IProtocol {
             if (balanceAfter != balanceBefore) {
                 uint256 difference = adjustedDecimals(tokenOut, balanceAfter - balanceBefore);
                 _protocolData.yield = int96(uint96(difference));
+                if (int96(uint96(difference)) > 0) balance += uint96(difference);
             }
         } else {
             IGmx(gmx.REWARD_ROUTER).claim();
@@ -182,7 +191,40 @@ contract Treasury is Ownable, IProtocol {
 
             uint256 difference = adjustedDecimals(tokenOut, amountOut);
             _protocolData.harvestedBalance = uint96(difference);
+            balance += uint96(difference);
         }
+    }
+
+    function harvestAaveV3(address token, uint256 amount, uint timestamp) external onlyOwner {
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
+        ProtocolData storage _protocolData = protocolData[bytes32("aave-v3")][timestamp];
+
+        address AAVE_V3POOL = aaveV3.pool;
+        IAave(AAVE_V3POOL).withdraw(token, amount, address(this));
+
+        uint256 balanceAfter = IERC20(token).balanceOf(address(this));
+        uint256 difference = adjustedDecimals(token, balanceAfter - balanceBefore);
+        _protocolData.harvestedBalance = uint96(difference);
+
+        balanceAfter = adjustedDecimals(token, balanceAfter);
+        _protocolData.yield = int96(uint96(balanceAfter - _protocolData.investedBalance));
+        if (_protocolData.yield > 0) balance += uint96(_protocolData.yield);
+    }
+
+    function farmAaveV3(address token, uint256 amount) external onlyOwner {
+        address AAVE_V3POOL = aaveV3.pool;
+        IERC20(token).approve(AAVE_V3POOL, IERC20(token).balanceOf(address(this)));
+        IAave(AAVE_V3POOL).supply(token, amount, address(this), uint16(0));
+
+        amount = adjustedDecimals(token, amount);
+        uint256 maxFarmable = (balance / 10 ** DEFAULT_DECIMALS) * protocolRatio[bytes32("aave-v3")] / MAX_RATIO;
+        if (amount / 10 ** DEFAULT_DECIMALS > maxFarmable) revert MaxRatioExceeded();
+
+        ProtocolData storage _protocolData = protocolData[bytes32("aave-v3")][block.timestamp];
+
+        _protocolData.investedBalance += uint96(amount);
+        _protocolData.tokenUsed = token;
+        balance -= uint96(amount);
     }
 
     /////////////////// get Functions ////////////////////////
@@ -211,9 +253,9 @@ contract Treasury is Ownable, IProtocol {
     /////////////////// Internal Functions ////////////////////
     //////////////////////////////////////////////////////////
 
-    function adjustedDecimals(address token, uint256 amount) internal view returns (uint64) {
+    function adjustedDecimals(address token, uint256 amount) internal view returns (uint96) {
         uint256 adjustedAmount = amount * (10 ** DEFAULT_DECIMALS) / (10 ** IERC20(token).decimals());
-        return uint64(adjustedAmount);
+        return uint96(adjustedAmount);
     }
 
     function oneInchSwap(bytes memory exchangeData) internal returns (uint96) {

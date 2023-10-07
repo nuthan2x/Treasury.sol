@@ -4,7 +4,7 @@ pragma solidity ^0.8.13;
 import "forge-std/Test.sol";
 import {Treasury} from "src/Treasury.sol";
 import {IERC20} from "src/interfaces/IERC20.sol";
-import {IProtocol, IGmx} from "src/interfaces/IProtocol.sol";
+import {IProtocol,IAave,  IGmx} from "src/interfaces/IProtocol.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 contract TreasuryTest is Test {
@@ -21,6 +21,8 @@ contract TreasuryTest is Test {
     // MAINNET
     address private constant USDC_MAINNET = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     address private constant DAI_MAINNET = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
+    address private constant USDT_MAINNET = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
+    address private constant AAVE_V3POOL = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
 
     // ARBITRUM
     address private constant USDC = 0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8;
@@ -40,6 +42,55 @@ contract TreasuryTest is Test {
         vm.label(address(treasury), "TREASURY");
     }
 
+    function testAaveV3() external {
+        setUpMainnetFork();
+
+        bytes32[] memory protocols = new bytes32[](1);
+        uint64[] memory newRatio = new uint64[](1);
+        protocols[0] = bytes32("aave-v3");
+        newRatio[0] = MAX_RATIO / 2;
+        treasury.setProtocolsRatio(protocols, newRatio);
+
+        IProtocol.AaveV3 memory aaveV3 = IProtocol.AaveV3(AAVE_V3POOL);
+        treasury.setAaveV3(aaveV3);
+
+        assertEq(treasury.getRemainingRatio(), MAX_RATIO / 2);
+        assertEq(treasury.getProtocolRatio(bytes32("aave-v3")), MAX_RATIO / 2);
+        assertEq(treasury.getBalance(), 0);
+
+        uint256 timestampFarmedIn = block.timestamp;
+
+        // farming In
+        {
+            uint256 balanceBefore = 1000e6;
+            deal(USDC_MAINNET, address(this), balanceBefore); // 1000 USDC
+            assertEq(IERC20(USDC_MAINNET).balanceOf(address(this)), balanceBefore);
+
+            IERC20(USDC_MAINNET).approve(address(treasury), balanceBefore);
+            treasury.deposit(USDC_MAINNET, balanceBefore);
+            assertEq(treasury.getBalance(), adjustedDecimals(USDC_MAINNET, balanceBefore));
+
+            treasury.farmAaveV3(USDC_MAINNET, balanceBefore / 2);
+            assertEq(
+                treasury.getProtocolData(bytes32("aave-v3"), timestampFarmedIn).investedBalance,
+                adjustedDecimals(USDC_MAINNET, balanceBefore / 2)
+            );
+        }
+
+        // farming Out
+        {
+            vm.rollFork(18296599); // oct 7 2023
+            (uint256 totalCollateralBase, uint256 totalDebtBase,,,,) = 
+                IAave(AAVE_V3POOL).getUserAccountData(address(treasury));
+            assertGt(totalCollateralBase, 500e6);
+            assertEq(totalDebtBase, 0);
+
+            treasury.harvestAaveV3(USDC_MAINNET, 100e6, timestampFarmedIn);
+            assertGt(treasury.getProtocolData(bytes32("aave-v3"), timestampFarmedIn).yield, 0);
+            assertGt(treasury.getProtocolData(bytes32("aave-v3"), timestampFarmedIn).harvestedBalance, 0);
+        }
+    }
+
     function testGmx() external {
         setUpArbFork();
 
@@ -56,7 +107,7 @@ contract TreasuryTest is Test {
         assertEq(treasury.getRemainingRatio(), 0);
         assertEq(treasury.getProtocolRatio(bytes32("gmx")), MAX_RATIO);
         assertEq(treasury.getBalance(), 0);
-                 
+
         uint256 timestampFarmedIn = block.timestamp;
 
         // faarming In
@@ -71,7 +122,7 @@ contract TreasuryTest is Test {
 
             uint256 glpPrice = IGmx(GLP_MANAGER).getPrice(true);
             uint256 minGlp = (glpPrice * 9500 / 1000) * balanceBefore / 1e30; // with slippage
-            treasury.farmInGmx(USDC, balanceBefore, 0, minGlp);
+            treasury.farmGmx(USDC, balanceBefore, 0, minGlp);
             assertEq(treasury.getProtocolData(bytes32("gmx"), timestampFarmedIn).investedBalance, balanceBefore);
         }
 
@@ -79,7 +130,7 @@ contract TreasuryTest is Test {
         {
             vm.rollFork(137961220); // oct 6 2023
             uint256 stakedAmount = IGmx(STAKEDGLP_TRACKER).stakedAmounts(address(treasury));
-            treasury.farmOutGmx(WETH, USDC, stakedAmount, 0, timestampFarmedIn, "");
+            treasury.harvestGmx(WETH, USDC, stakedAmount, 0, timestampFarmedIn, "");
 
             uint256 rewardAmount = IERC20(WETH).balanceOf(address(treasury));
             string[] memory res = new string[](8);
@@ -92,7 +143,7 @@ contract TreasuryTest is Test {
             res[6] = res[7] = Strings.toHexString(address(treasury));
 
             bytes memory exchangeData = vm.ffi(res);
-            treasury.farmOutGmx(WETH, USDC, stakedAmount, 0, timestampFarmedIn, exchangeData);
+            treasury.harvestGmx(WETH, USDC, stakedAmount, 0, timestampFarmedIn, exchangeData);
 
             assertGt(treasury.getProtocolData(bytes32("gmx"), timestampFarmedIn).yield, 0);
             assertGt(treasury.getProtocolData(bytes32("gmx"), timestampFarmedIn).harvestedBalance, 0);
@@ -132,9 +183,9 @@ contract TreasuryTest is Test {
     }
 
     /////////////// helpers /////////////////
-    function adjustedDecimals(address token, uint256 amount) internal view returns (uint64) {
+    function adjustedDecimals(address token, uint256 amount) internal view returns (uint96) {
         uint256 adjustedAmount = amount * (10 ** DEFAULT_DECIMALS) / (10 ** IERC20(token).decimals());
-        return uint64(adjustedAmount);
+        return uint96(adjustedAmount);
     }
 
     function setUpArbFork() internal {
@@ -147,11 +198,12 @@ contract TreasuryTest is Test {
         mainnetForkId = vm.createSelectFork(MAINNET_RPC, 17802698); //  30 Jul 2023
         treasury = new Treasury();
 
-        address[] memory tokens = new address[](2);
-        bool[] memory isWhitelist = new bool[](2);
+        address[] memory tokens = new address[](3);
+        bool[] memory isWhitelist = new bool[](3);
         tokens[0] = USDC_MAINNET;
         tokens[1] = DAI_MAINNET;
-        isWhitelist[0] = isWhitelist[1] = true;
+        tokens[2] = USDT_MAINNET;
+        isWhitelist[0] = isWhitelist[1] = isWhitelist[2] = true;
 
         treasury.whitelistTokens(tokens, isWhitelist);
     }
