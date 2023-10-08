@@ -39,7 +39,7 @@ interface IAave {
 }
 
 interface IStargate {
-    function userInfo(uint256 poolId, address user) external returns(uint256 amount, uint256 rewardDebt);
+    function userInfo(uint256 poolId, address user) external returns (uint256 amount, uint256 rewardDebt);
     function addLiquidity(uint256 poolId, uint256 amount, address to) external;
     function deposit(uint256 poolId, uint256 amount) external;
     function withdraw(uint256 poolId, uint256 amount) external;

@@ -1,66 +1,64 @@
-## Foundry
+## Treasury
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+*Treasury.sol is a contract that allows depositing stablecoins and allow the owner tofarm and harvest on GMX, AAVE and Stargate pools.*
 
-Foundry consists of:
+## Deployments
+- On Polygon mumbai => [Treasury.sol](https://mumbai.polygonscan.com/address/0xe5415c9f1f4e89e84e3fa5899adb6fbd72b81ea7#writeContract)
 
--   **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
--   **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
--   **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
--   **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+## Test
+- fork the repo and run the below commands to test
 
-## Documentation
-
-https://book.getfoundry.sh/
-
-## Usage
-
-### Build
-
-```shell
-$ forge build
+```
+npm install; forge build;
+forge t -mt testAaveV3 -vvv
+forge t --ffi --mt testGmx  -vvv
+forge t --ffi --mt testStargate  -vvv
+forge t --ffi --mt testSwap -vvv
 ```
 
-### Test
-
-```shell
-$ forge test
+### Main functions
+```
+deposit(address,uint256)
+withdraw(address,uint256)
+swap(address,address,address,bytes)
 ```
 
-### Format
 
-```shell
-$ forge fmt
+### Farm and harvest functions
+```
+farmStargate(address,uint256,uint256,address)
+harvestStargate(address,uint16,uint256,address,bytes,uint256)
+
+farmAaveV3(address,uint256)
+harvestAaveV3(address,uint256,uint256)
+
+farmGmx(address,uint256,uint256,uint256)
+harvestGmx(address,address,uint256,uint256,uint256,bytes)
 ```
 
-### Gas Snapshots
+### Setter functions
+```
+setAaveV3(AaveV3)
+setStargate(Stargate)
+setGmx(Gmx)
 
-```shell
-$ forge snapshot
+setProtocolRatio(bytes32,uint64)
+setProtocolsRatio(bytes32[],uint64[])
+whitelistToken(address,bool)
+whitelistTokens(address[],bool[])
 ```
 
-### Anvil
-
-```shell
-$ anvil
+### View functions
+```
+getRemainingRatio()
+getBalance()
+getProtocolData(bytes32,uint256)
+getProtocolRatio(bytes32)
+getWhitelisted(address)
 ```
 
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
+### Internal helper functions
 ```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
+adjustedDecimals(address,uint256)
+oneInchSwap(bytes)
 ```

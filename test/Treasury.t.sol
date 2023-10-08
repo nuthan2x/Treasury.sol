@@ -10,11 +10,9 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 contract TreasuryTest is Test {
     uint256 private constant DEFAULT_DECIMALS = 18;
     uint64 private constant MAX_RATIO = 1e18;
-    // TODO : change local rpc
-    string private constant MAINNET_RPC = "http://127.0.0.1:8547";
-    string private constant ARB_RPC = "http://127.0.0.1:8545";
-    // string private constant ARB_RPC = "https://rpc.ankr.com/arbitrum";
-    // string private constant MAINNET_RPC = "https://rpc.ankr.com/eth";
+
+    string private constant ARB_RPC = "https://rpc.ankr.com/arbitrum";
+    string private constant MAINNET_RPC = "https://rpc.ankr.com/eth";
     uint256 private arbForkId;
     uint256 private mainnetForkId;
 
@@ -65,7 +63,7 @@ contract TreasuryTest is Test {
         uint256 timestampFarmedIn = block.timestamp;
         uint256 balanceBefore = 1000e6;
 
-        // farming 
+        // farming
         {
             deal(USDC_MAINNET, address(this), balanceBefore); // 1000 USDC
             assertEq(IERC20(USDC_MAINNET).balanceOf(address(this)), balanceBefore);
@@ -84,7 +82,7 @@ contract TreasuryTest is Test {
         // harvesting
         {
             vm.rollFork(18296599); // oct 7 2023
-            (uint removeAmount, ) = IStargate(STARGATE_LP_STAKING).userInfo(0, address(treasury));
+            (uint256 removeAmount,) = IStargate(STARGATE_LP_STAKING).userInfo(0, address(treasury));
             treasury.harvestStargate(USDC_MAINNET, 1, removeAmount, STARGATE_USDC_LP, "", timestampFarmedIn);
 
             string[] memory res = new string[](8);
@@ -122,7 +120,7 @@ contract TreasuryTest is Test {
 
         uint256 timestampFarmedIn = block.timestamp;
 
-        // farming 
+        // farming
         {
             uint256 balanceBefore = 1000e6;
             deal(USDC_MAINNET, address(this), balanceBefore); // 1000 USDC
@@ -172,7 +170,7 @@ contract TreasuryTest is Test {
 
         uint256 timestampFarmedIn = block.timestamp;
 
-        // faarming 
+        // faarming
         {
             uint256 balanceBefore = 1000e6;
             deal(USDC, address(this), balanceBefore); // 1000 USDC
@@ -185,7 +183,10 @@ contract TreasuryTest is Test {
             uint256 glpPrice = IGmx(GLP_MANAGER).getPrice(true);
             uint256 minGlp = (glpPrice * 9500 / 1000) * balanceBefore / 1e30; // with slippage
             treasury.farmGmx(USDC, balanceBefore, 0, minGlp);
-            assertEq(treasury.getProtocolData(bytes32("gmx"), timestampFarmedIn).investedBalance, balanceBefore);
+            assertEq(
+                treasury.getProtocolData(bytes32("gmx"), timestampFarmedIn).investedBalance,
+                adjustedDecimals(USDC, balanceBefore)
+            );
         }
 
         // harvesting
@@ -210,12 +211,6 @@ contract TreasuryTest is Test {
             assertGt(treasury.getProtocolData(bytes32("gmx"), timestampFarmedIn).yield, 0);
             assertGt(treasury.getProtocolData(bytes32("gmx"), timestampFarmedIn).harvestedBalance, 0);
         }
-
-        // address[] memory trackers = new address[](2);
-        // trackers[0] = FEEGLP_TRACKER;
-        // trackers[1] = STAKEDGLP_TRACKER;
-        // uint[] memory info =  IGmx(0x8BFb8e82Ee4569aee78D03235ff465Bd436D40E0).getStakingInfo(
-        //         address(treasury), trackers);
     }
 
     function testSwap() external {

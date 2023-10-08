@@ -5,7 +5,6 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IProtocol, IAave, IStargate, IGmx} from "src/interfaces/IProtocol.sol";
 import {IERC20} from "src/interfaces/IERC20.sol";
-import "forge-std/Test.sol";
 
 contract Treasury is Ownable, IProtocol {
     using SafeERC20 for IERC20;
@@ -19,11 +18,14 @@ contract Treasury is Ownable, IProtocol {
     error BalanceLessThanAmount();
     error SwapFailed();
 
-    // TODO : emit events
-    // TODO : natspec comments
-    // TODO : move events, and errors to separate libraries
-
     event Deposit(address depositor, address token, uint256 amount);
+    event Withdraw(address token, uint256 amount);
+    event FarmAaveV3(address token, uint256 amount);
+    event HarvestAaveV3(address token, uint256 amount, uint256 timestamp, int96 yield);
+    event FarmStargate(address token, uint256 amount, uint256 poolId);
+    event HarvestStargate(address token, uint256 amount, uint256 timestamp, uint16 poolId, int96 yield);
+    event FarmGmx(address token, uint256 amount);
+    event HarvestGmx(address token, uint256 amount, uint256 timestamp, int96 yield);
 
     struct ProtocolData {
         uint96 investedBalance;
@@ -58,6 +60,7 @@ contract Treasury is Ownable, IProtocol {
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         balance += adjustedDecimals(token, amount);
 
+        emit Deposit(msg.sender, token, amount);
         return true;
     }
 
@@ -67,6 +70,8 @@ contract Treasury is Ownable, IProtocol {
 
         IERC20(token).safeTransfer(msg.sender, amount);
         balance -= adjustedDecimals(token, amount);
+
+        emit Withdraw(token, amount);
         return true;
     }
 
@@ -157,11 +162,11 @@ contract Treasury is Ownable, IProtocol {
         address STARGATE_ROUTER = stargate.router;
         IERC20(token).approve(STARGATE_ROUTER, IERC20(token).balanceOf(address(this)));
         IStargate(STARGATE_ROUTER).addLiquidity(poolId, amount, address(this));
-        
+
         address STARGATE_LP_STAKING = stargate.lpStaking;
-        uint lpBalance = IERC20(lpToken).balanceOf(address(this));
+        uint256 lpBalance = IERC20(lpToken).balanceOf(address(this));
         IERC20(lpToken).approve(STARGATE_LP_STAKING, lpBalance);
-        IStargate(STARGATE_LP_STAKING).deposit(poolId -1, lpBalance);
+        IStargate(STARGATE_LP_STAKING).deposit(poolId - 1, lpBalance);
 
         amount = adjustedDecimals(token, amount);
         uint256 maxFarmable = (balance / 10 ** DEFAULT_DECIMALS) * protocolRatio[bytes32("stargate")] / MAX_RATIO;
@@ -172,16 +177,25 @@ contract Treasury is Ownable, IProtocol {
         _protocolData.investedBalance += uint96(amount);
         _protocolData.tokenUsed = token;
         balance -= uint96(amount);
+
+        emit FarmStargate(token, amount, poolId);
     }
 
-    function harvestStargate(address token, uint16 poolId, uint256 amount, address lpToken, bytes memory exchangeData, uint256 timestamp) external onlyOwner {
+    function harvestStargate(
+        address token,
+        uint16 poolId,
+        uint256 amount,
+        address lpToken,
+        bytes memory exchangeData,
+        uint256 timestamp
+    ) external onlyOwner {
         uint256 balanceBefore = IERC20(token).balanceOf(address(this));
         ProtocolData storage _protocolData = protocolData[bytes32("stargate")][timestamp];
 
-        
-
         if (exchangeData.length > 0) {
-            IERC20(stargate.stargateToken).approve(oneInchRouter, IERC20(stargate.stargateToken).balanceOf(address(this)));
+            IERC20(stargate.stargateToken).approve(
+                oneInchRouter, IERC20(stargate.stargateToken).balanceOf(address(this))
+            );
             oneInchSwap(exchangeData);
 
             uint256 balanceAfter = IERC20(token).balanceOf(address(this));
@@ -192,7 +206,7 @@ contract Treasury is Ownable, IProtocol {
             }
         } else {
             address STARGATE_LP_STAKING = stargate.lpStaking;
-            IStargate(STARGATE_LP_STAKING).withdraw(poolId -1, amount);
+            IStargate(STARGATE_LP_STAKING).withdraw(poolId - 1, amount);
 
             address STARGATE_ROUTER = stargate.router;
             IStargate(STARGATE_ROUTER).instantRedeemLocal(poolId, amount, address(this));
@@ -205,6 +219,8 @@ contract Treasury is Ownable, IProtocol {
             _protocolData.yield = int96(uint96(balanceAfter - _protocolData.investedBalance));
             if (_protocolData.yield > 0) balance += uint96(_protocolData.yield);
         }
+
+        emit HarvestStargate(token, amount, timestamp, poolId, _protocolData.yield);
     }
 
     function farmAaveV3(address token, uint256 amount) external onlyOwner {
@@ -221,6 +237,8 @@ contract Treasury is Ownable, IProtocol {
         _protocolData.investedBalance += uint96(amount);
         _protocolData.tokenUsed = token;
         balance -= uint96(amount);
+
+        emit FarmAaveV3(token, amount);
     }
 
     function harvestAaveV3(address token, uint256 amount, uint256 timestamp) external onlyOwner {
@@ -237,22 +255,22 @@ contract Treasury is Ownable, IProtocol {
         balanceAfter = adjustedDecimals(token, balanceAfter);
         _protocolData.yield = int96(uint96(balanceAfter - _protocolData.investedBalance));
         if (_protocolData.yield > 0) balance += uint96(_protocolData.yield);
+
+        emit HarvestAaveV3(token, amount, timestamp, _protocolData.yield);
     }
 
     function farmGmx(address token, uint256 amount, uint256 minUsdg, uint256 minGlp) external onlyOwner {
         IERC20(token).approve(gmx.GLP_MANAGER, amount);
-        uint256 glpAmount = IGmx(gmx.REWARD_ROUTER2).mintAndStakeGlp(token, amount, minUsdg, minGlp);
+        IGmx(gmx.REWARD_ROUTER2).mintAndStakeGlp(token, amount, minUsdg, minGlp);
 
         amount = adjustedDecimals(token, amount);
-        amount = adjustedDecimals(token, amount);
-        uint256 maxFarmable = (balance / 10 ** DEFAULT_DECIMALS) * protocolRatio[bytes32("gmx")] / MAX_RATIO;
-        if (amount / 10 ** DEFAULT_DECIMALS > maxFarmable) revert MaxRatioExceeded();
-
         ProtocolData storage _protocolData = protocolData[bytes32("gmx")][block.timestamp];
 
         _protocolData.investedBalance += uint96(amount);
         _protocolData.tokenUsed = token;
         balance -= uint96(amount);
+
+        emit FarmGmx(token, amount);
     }
 
     function harvestGmx(
@@ -284,6 +302,8 @@ contract Treasury is Ownable, IProtocol {
             _protocolData.harvestedBalance = uint96(difference);
             balance += uint96(difference);
         }
+
+        emit HarvestGmx(tokenOut, glpAmount, timestamp, _protocolData.yield);
     }
 
     /////////////////// get Functions ////////////////////////
