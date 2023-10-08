@@ -15,6 +15,12 @@ interface IProtocol {
     struct AaveV3 {
         address pool;
     }
+
+    struct Stargate {
+        address router;
+        address lpStaking;
+        address stargateToken;
+    }
 }
 
 interface IAave {
@@ -30,6 +36,14 @@ interface IAave {
             uint256 ltv,
             uint256 healthFactor
         );
+}
+
+interface IStargate {
+    function userInfo(uint256 poolId, address user) external returns(uint256 amount, uint256 rewardDebt);
+    function addLiquidity(uint256 poolId, uint256 amount, address to) external;
+    function deposit(uint256 poolId, uint256 amount) external;
+    function withdraw(uint256 poolId, uint256 amount) external;
+    function instantRedeemLocal(uint16 srcPoolId, uint256 amount, address to) external;
 }
 
 interface IGmx {

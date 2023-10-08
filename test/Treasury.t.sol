@@ -4,7 +4,7 @@ pragma solidity ^0.8.13;
 import "forge-std/Test.sol";
 import {Treasury} from "src/Treasury.sol";
 import {IERC20} from "src/interfaces/IERC20.sol";
-import {IProtocol,IAave,  IGmx} from "src/interfaces/IProtocol.sol";
+import {IProtocol, IAave, IStargate, IGmx} from "src/interfaces/IProtocol.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 contract TreasuryTest is Test {
@@ -23,6 +23,10 @@ contract TreasuryTest is Test {
     address private constant DAI_MAINNET = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
     address private constant USDT_MAINNET = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
     address private constant AAVE_V3POOL = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
+    address private constant STARGATE_ROUTER = 0x8731d54E9D02c286767d56ac03e8037C07e01e98;
+    address private constant STARGATE_USDC_LP = 0xdf0770dF86a8034b3EFEf0A1Bb3c889B8332FF56;
+    address private constant STARGATE_LP_STAKING = 0xB0D502E938ed5f4df2E681fE6E419ff29631d62b;
+    address private constant STG_TOKEN = 0xAf5191B0De278C7286d6C7CC6ab6BB8A73bA2Cd6;
 
     // ARBITRUM
     address private constant USDC = 0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8;
@@ -40,6 +44,64 @@ contract TreasuryTest is Test {
     function setUp() public {
         // TODO : vm label as much
         vm.label(address(treasury), "TREASURY");
+    }
+
+    function testStargate() external {
+        setUpMainnetFork();
+
+        bytes32[] memory protocols = new bytes32[](1);
+        uint64[] memory newRatio = new uint64[](1);
+        protocols[0] = bytes32("stargate");
+        newRatio[0] = MAX_RATIO / 4;
+        treasury.setProtocolsRatio(protocols, newRatio);
+
+        IProtocol.Stargate memory stragate = IProtocol.Stargate(STARGATE_ROUTER, STARGATE_LP_STAKING, STG_TOKEN);
+        treasury.setStargate(stragate);
+
+        assertEq(treasury.getRemainingRatio(), MAX_RATIO * 3 / 4);
+        assertEq(treasury.getProtocolRatio(bytes32("stargate")), MAX_RATIO / 4);
+        assertEq(treasury.getBalance(), 0);
+
+        uint256 timestampFarmedIn = block.timestamp;
+        uint256 balanceBefore = 1000e6;
+
+        // farming 
+        {
+            deal(USDC_MAINNET, address(this), balanceBefore); // 1000 USDC
+            assertEq(IERC20(USDC_MAINNET).balanceOf(address(this)), balanceBefore);
+
+            IERC20(USDC_MAINNET).approve(address(treasury), balanceBefore);
+            treasury.deposit(USDC_MAINNET, balanceBefore);
+            assertEq(treasury.getBalance(), adjustedDecimals(USDC_MAINNET, balanceBefore));
+
+            treasury.farmStargate(USDC_MAINNET, 1, balanceBefore / 4, STARGATE_USDC_LP);
+            assertEq(
+                treasury.getProtocolData(bytes32("stargate"), timestampFarmedIn).investedBalance,
+                adjustedDecimals(USDC_MAINNET, balanceBefore / 4)
+            );
+        }
+
+        // harvesting
+        {
+            vm.rollFork(18296599); // oct 7 2023
+            (uint removeAmount, ) = IStargate(STARGATE_LP_STAKING).userInfo(0, address(treasury));
+            treasury.harvestStargate(USDC_MAINNET, 1, removeAmount, STARGATE_USDC_LP, "", timestampFarmedIn);
+
+            string[] memory res = new string[](8);
+            res[0] = "node";
+            res[1] = "test/1inch.js";
+            res[2] = "1"; // chainId
+            res[3] = Strings.toHexString(address(STG_TOKEN));
+            res[4] = Strings.toHexString(address(USDC_MAINNET));
+            res[5] = Strings.toString(uint256(IERC20(STG_TOKEN).balanceOf(address(treasury))));
+            res[6] = res[7] = Strings.toHexString(address(treasury));
+
+            bytes memory exchangeData = vm.ffi(res);
+            treasury.harvestStargate(USDC_MAINNET, 1, removeAmount, STARGATE_USDC_LP, exchangeData, timestampFarmedIn);
+
+            assertGt(treasury.getProtocolData(bytes32("stargate"), timestampFarmedIn).yield, 0);
+            assertGt(treasury.getProtocolData(bytes32("stargate"), timestampFarmedIn).harvestedBalance, 0);
+        }
     }
 
     function testAaveV3() external {
@@ -60,7 +122,7 @@ contract TreasuryTest is Test {
 
         uint256 timestampFarmedIn = block.timestamp;
 
-        // farming In
+        // farming 
         {
             uint256 balanceBefore = 1000e6;
             deal(USDC_MAINNET, address(this), balanceBefore); // 1000 USDC
@@ -77,10 +139,10 @@ contract TreasuryTest is Test {
             );
         }
 
-        // farming Out
+        // harvesting
         {
             vm.rollFork(18296599); // oct 7 2023
-            (uint256 totalCollateralBase, uint256 totalDebtBase,,,,) = 
+            (uint256 totalCollateralBase, uint256 totalDebtBase,,,,) =
                 IAave(AAVE_V3POOL).getUserAccountData(address(treasury));
             assertGt(totalCollateralBase, 500e6);
             assertEq(totalDebtBase, 0);
@@ -110,7 +172,7 @@ contract TreasuryTest is Test {
 
         uint256 timestampFarmedIn = block.timestamp;
 
-        // faarming In
+        // faarming 
         {
             uint256 balanceBefore = 1000e6;
             deal(USDC, address(this), balanceBefore); // 1000 USDC
@@ -126,7 +188,7 @@ contract TreasuryTest is Test {
             assertEq(treasury.getProtocolData(bytes32("gmx"), timestampFarmedIn).investedBalance, balanceBefore);
         }
 
-        // farming Out
+        // harvesting
         {
             vm.rollFork(137961220); // oct 6 2023
             uint256 stakedAmount = IGmx(STAKEDGLP_TRACKER).stakedAmounts(address(treasury));
@@ -195,7 +257,7 @@ contract TreasuryTest is Test {
     }
 
     function setUpMainnetFork() internal {
-        mainnetForkId = vm.createSelectFork(MAINNET_RPC, 17802698); //  30 Jul 2023
+        mainnetForkId = vm.createSelectFork(MAINNET_RPC, 17402698); //  30 Jul 2023
         treasury = new Treasury();
 
         address[] memory tokens = new address[](3);

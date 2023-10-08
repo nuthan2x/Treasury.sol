@@ -25,11 +25,11 @@ async function main() {
     // "ARBITRUM_CURVE", 
     // "ARBITRUM_CURVE_V2"
   ] : [
-    // "SUSHI", 
-    // "UNISWAP_V2", 
+    "SUSHI", 
+    "UNISWAP_V2", 
     "UNISWAP_V3", 
-    // "CURVE", 
-    // "COMPOUND"
+    "CURVE", 
+    "COMPOUND"
   ];
 
   return fetch(

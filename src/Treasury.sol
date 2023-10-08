@@ -3,7 +3,7 @@ pragma solidity ^0.8.18;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IProtocol, IAave, IGmx} from "src/interfaces/IProtocol.sol";
+import {IProtocol, IAave, IStargate, IGmx} from "src/interfaces/IProtocol.sol";
 import {IERC20} from "src/interfaces/IERC20.sol";
 import "forge-std/Test.sol";
 
@@ -44,6 +44,7 @@ contract Treasury is Ownable, IProtocol {
 
     Gmx public gmx;
     AaveV3 public aaveV3;
+    Stargate public stargate;
 
     constructor() {
         remainingRatio = MAX_RATIO;
@@ -99,6 +100,18 @@ contract Treasury is Ownable, IProtocol {
     /////////////////// setter Functions ////////////////////
     //////////////////////////////////////////////////////////
 
+    function setAaveV3(AaveV3 memory _aaveV3) external onlyOwner {
+        aaveV3 = _aaveV3;
+    }
+
+    function setStargate(Stargate memory _stargate) external onlyOwner {
+        stargate = _stargate;
+    }
+
+    function setGmx(Gmx memory _gmx) external onlyOwner {
+        gmx = _gmx;
+    }
+
     function setProtocolRatio(bytes32 protocol, uint64 newRatio) public onlyOwner {
         uint64 _prevRatio = protocolRatio[protocol];
         if (newRatio > remainingRatio + _prevRatio) revert MaxRatioExceeded();
@@ -137,16 +150,94 @@ contract Treasury is Ownable, IProtocol {
         }
     }
 
-    function setAaveV3(AaveV3 memory _aaveV3) external onlyOwner {
-        aaveV3 = _aaveV3;
-    }
-
-    function setGmx(Gmx memory _gmx) external onlyOwner {
-        gmx = _gmx;
-    }
-
     /////////////////// protocol Functions ////////////////////
     //////////////////////////////////////////////////////////
+
+    function farmStargate(address token, uint256 poolId, uint256 amount, address lpToken) external onlyOwner {
+        address STARGATE_ROUTER = stargate.router;
+        IERC20(token).approve(STARGATE_ROUTER, IERC20(token).balanceOf(address(this)));
+        IStargate(STARGATE_ROUTER).addLiquidity(poolId, amount, address(this));
+        
+        address STARGATE_LP_STAKING = stargate.lpStaking;
+        uint lpBalance = IERC20(lpToken).balanceOf(address(this));
+        IERC20(lpToken).approve(STARGATE_LP_STAKING, lpBalance);
+        IStargate(STARGATE_LP_STAKING).deposit(poolId -1, lpBalance);
+
+        amount = adjustedDecimals(token, amount);
+        uint256 maxFarmable = (balance / 10 ** DEFAULT_DECIMALS) * protocolRatio[bytes32("stargate")] / MAX_RATIO;
+        if (amount / 10 ** DEFAULT_DECIMALS > maxFarmable) revert MaxRatioExceeded();
+
+        ProtocolData storage _protocolData = protocolData[bytes32("stargate")][block.timestamp];
+
+        _protocolData.investedBalance += uint96(amount);
+        _protocolData.tokenUsed = token;
+        balance -= uint96(amount);
+    }
+
+    function harvestStargate(address token, uint16 poolId, uint256 amount, address lpToken, bytes memory exchangeData, uint256 timestamp) external onlyOwner {
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
+        ProtocolData storage _protocolData = protocolData[bytes32("stargate")][timestamp];
+
+        
+
+        if (exchangeData.length > 0) {
+            IERC20(stargate.stargateToken).approve(oneInchRouter, IERC20(stargate.stargateToken).balanceOf(address(this)));
+            oneInchSwap(exchangeData);
+
+            uint256 balanceAfter = IERC20(token).balanceOf(address(this));
+            if (balanceAfter != balanceBefore) {
+                uint256 difference = adjustedDecimals(token, balanceAfter - balanceBefore);
+                _protocolData.yield = int96(uint96(difference));
+                if (int96(uint96(difference)) > 0) balance += uint96(difference);
+            }
+        } else {
+            address STARGATE_LP_STAKING = stargate.lpStaking;
+            IStargate(STARGATE_LP_STAKING).withdraw(poolId -1, amount);
+
+            address STARGATE_ROUTER = stargate.router;
+            IStargate(STARGATE_ROUTER).instantRedeemLocal(poolId, amount, address(this));
+
+            uint256 balanceAfter = IERC20(token).balanceOf(address(this));
+            uint256 difference = adjustedDecimals(token, balanceAfter - balanceBefore);
+            _protocolData.harvestedBalance = uint96(difference);
+
+            balanceAfter = adjustedDecimals(token, balanceAfter);
+            _protocolData.yield = int96(uint96(balanceAfter - _protocolData.investedBalance));
+            if (_protocolData.yield > 0) balance += uint96(_protocolData.yield);
+        }
+    }
+
+    function farmAaveV3(address token, uint256 amount) external onlyOwner {
+        address AAVE_V3POOL = aaveV3.pool;
+        IERC20(token).approve(AAVE_V3POOL, IERC20(token).balanceOf(address(this)));
+        IAave(AAVE_V3POOL).supply(token, amount, address(this), uint16(0));
+
+        amount = adjustedDecimals(token, amount);
+        uint256 maxFarmable = (balance / 10 ** DEFAULT_DECIMALS) * protocolRatio[bytes32("aave-v3")] / MAX_RATIO;
+        if (amount / 10 ** DEFAULT_DECIMALS > maxFarmable) revert MaxRatioExceeded();
+
+        ProtocolData storage _protocolData = protocolData[bytes32("aave-v3")][block.timestamp];
+
+        _protocolData.investedBalance += uint96(amount);
+        _protocolData.tokenUsed = token;
+        balance -= uint96(amount);
+    }
+
+    function harvestAaveV3(address token, uint256 amount, uint256 timestamp) external onlyOwner {
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
+        ProtocolData storage _protocolData = protocolData[bytes32("aave-v3")][timestamp];
+
+        address AAVE_V3POOL = aaveV3.pool;
+        IAave(AAVE_V3POOL).withdraw(token, amount, address(this));
+
+        uint256 balanceAfter = IERC20(token).balanceOf(address(this));
+        uint256 difference = adjustedDecimals(token, balanceAfter - balanceBefore);
+        _protocolData.harvestedBalance = uint96(difference);
+
+        balanceAfter = adjustedDecimals(token, balanceAfter);
+        _protocolData.yield = int96(uint96(balanceAfter - _protocolData.investedBalance));
+        if (_protocolData.yield > 0) balance += uint96(_protocolData.yield);
+    }
 
     function farmGmx(address token, uint256 amount, uint256 minUsdg, uint256 minGlp) external onlyOwner {
         IERC20(token).approve(gmx.GLP_MANAGER, amount);
@@ -193,38 +284,6 @@ contract Treasury is Ownable, IProtocol {
             _protocolData.harvestedBalance = uint96(difference);
             balance += uint96(difference);
         }
-    }
-
-    function harvestAaveV3(address token, uint256 amount, uint timestamp) external onlyOwner {
-        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
-        ProtocolData storage _protocolData = protocolData[bytes32("aave-v3")][timestamp];
-
-        address AAVE_V3POOL = aaveV3.pool;
-        IAave(AAVE_V3POOL).withdraw(token, amount, address(this));
-
-        uint256 balanceAfter = IERC20(token).balanceOf(address(this));
-        uint256 difference = adjustedDecimals(token, balanceAfter - balanceBefore);
-        _protocolData.harvestedBalance = uint96(difference);
-
-        balanceAfter = adjustedDecimals(token, balanceAfter);
-        _protocolData.yield = int96(uint96(balanceAfter - _protocolData.investedBalance));
-        if (_protocolData.yield > 0) balance += uint96(_protocolData.yield);
-    }
-
-    function farmAaveV3(address token, uint256 amount) external onlyOwner {
-        address AAVE_V3POOL = aaveV3.pool;
-        IERC20(token).approve(AAVE_V3POOL, IERC20(token).balanceOf(address(this)));
-        IAave(AAVE_V3POOL).supply(token, amount, address(this), uint16(0));
-
-        amount = adjustedDecimals(token, amount);
-        uint256 maxFarmable = (balance / 10 ** DEFAULT_DECIMALS) * protocolRatio[bytes32("aave-v3")] / MAX_RATIO;
-        if (amount / 10 ** DEFAULT_DECIMALS > maxFarmable) revert MaxRatioExceeded();
-
-        ProtocolData storage _protocolData = protocolData[bytes32("aave-v3")][block.timestamp];
-
-        _protocolData.investedBalance += uint96(amount);
-        _protocolData.tokenUsed = token;
-        balance -= uint96(amount);
     }
 
     /////////////////// get Functions ////////////////////////
